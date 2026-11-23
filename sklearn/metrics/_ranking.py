@@ -1738,16 +1738,11 @@ def _dcg_sample_scores(y_true, y_score, k=None, log_base=2, ignore_ties=False):
         ranked = y_true[np.arange(ranking.shape[0])[:, np.newaxis], ranking]
         cumulative_gains = discount.dot(ranked.T)
     else:
-        discount_cumsum = np.cumsum(discount)
-        cumulative_gains = [
-            _tie_averaged_dcg(y_t, y_s, discount_cumsum)
-            for y_t, y_s in zip(y_true, y_score)
-        ]
-        cumulative_gains = np.asarray(cumulative_gains)
+        cumulative_gains = _tie_averaged_dcg(y_true, y_score, discount)
     return cumulative_gains
 
 
-def _tie_averaged_dcg(y_true, y_score, discount_cumsum):
+def _tie_averaged_dcg(y_true, y_score, discount):
     """
     Compute DCG by averaging over possible permutations of ties.
 
@@ -1761,21 +1756,26 @@ def _tie_averaged_dcg(y_true, y_score, discount_cumsum):
 
     (note in the case of dcg@k the discount is 0 after index k)
 
+    All samples are processed at once: rows are sorted by decreasing score,
+    tied groups are detected as runs of equal consecutive scores, and the
+    gains are averaged within each group with a single ``np.add.reduceat``
+    call over the flattened array.
+
     Parameters
     ----------
-    y_true : ndarray
+    y_true : ndarray of shape (n_samples, n_labels)
         The true relevance scores.
 
-    y_score : ndarray
+    y_score : ndarray of shape (n_samples, n_labels)
         Predicted scores.
 
-    discount_cumsum : ndarray
-        Precomputed cumulative sum of the discounts.
+    discount : ndarray of shape (n_labels,)
+        Discount applied to each rank (0 for ranks beyond k).
 
     Returns
     -------
-    discounted_cumulative_gain : float
-        The discounted cumulative gain.
+    discounted_cumulative_gain : ndarray of shape (n_samples,)
+        The discounted cumulative gain of each sample.
 
     References
     ----------
@@ -1784,15 +1784,23 @@ def _tie_averaged_dcg(y_true, y_score, discount_cumsum):
     European conference on information retrieval (pp. 414-421). Springer,
     Berlin, Heidelberg.
     """
-    _, inv, counts = np.unique(-y_score, return_inverse=True, return_counts=True)
-    ranked = np.zeros(len(counts))
-    np.add.at(ranked, inv, y_true)
-    ranked /= counts
-    groups = np.cumsum(counts) - 1
-    discount_sums = np.empty(len(counts))
-    discount_sums[0] = discount_cumsum[groups[0]]
-    discount_sums[1:] = np.diff(discount_cumsum[groups])
-    return (ranked * discount_sums).sum()
+    n_samples, n_labels = y_score.shape
+    order = np.argsort(-y_score, axis=1)
+    sorted_score = np.take_along_axis(y_score, order, axis=1)
+    sorted_true = np.take_along_axis(y_true, order, axis=1).astype(
+        np.float64, copy=False
+    )
+
+    # A new tied group starts at the first rank of every sample and wherever
+    # the score differs from the one at the previous rank.
+    group_start = np.ones((n_samples, n_labels), dtype=bool)
+    group_start[:, 1:] = sorted_score[:, 1:] != sorted_score[:, :-1]
+    starts = np.flatnonzero(group_start.ravel())
+    counts = np.diff(np.append(starts, n_samples * n_labels))
+
+    mean_gain = np.add.reduceat(sorted_true.ravel(), starts) / counts
+    averaged = np.repeat(mean_gain, counts).reshape(n_samples, n_labels)
+    return averaged @ discount
 
 
 def _check_dcg_target_type(y_true):
