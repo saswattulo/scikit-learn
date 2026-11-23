@@ -1,3 +1,4 @@
+import itertools
 import math
 import re
 
@@ -2115,6 +2116,41 @@ def test_dcg_ties():
             + discounts[2:].sum() * y_true[0, :3].mean()
         ]
     )
+
+
+@pytest.mark.parametrize("k", [None, 1, 2, 4])
+def test_dcg_ties_matches_permutation_average(k):
+    """Tie-averaged DCG must equal the DCG averaged over all tie-breakings.
+
+    Checks the vectorized implementation on several samples at once, each
+    with a different tie structure, including tied groups crossing rank k.
+    """
+    rng = np.random.RandomState(0)
+    n_labels = 5
+    y_true = rng.randint(0, 4, size=(6, n_labels))
+    y_score = np.array(
+        [
+            [0, 0, 0, 0, 0],
+            [3, 1, 3, 1, 2],
+            [1, 2, 3, 4, 5],
+            [2, 2, 1, 1, 0],
+            [0.5, -0.0, 0.0, 0.5, 0.5],
+            [4, 4, 4, 1, 4],
+        ]
+    )
+    discount = 1 / np.log2(np.arange(n_labels) + 2)
+    if k is not None:
+        discount[k:] = 0
+
+    expected = []
+    for y_t, y_s in zip(y_true, y_score):
+        dcgs = []
+        for perm in itertools.permutations(range(n_labels)):
+            order = sorted(range(n_labels), key=lambda i: (-y_s[i], perm[i]))
+            dcgs.append(discount @ y_t[order])
+        expected.append(np.mean(dcgs))
+
+    assert_allclose(_dcg_sample_scores(y_true, y_score, k=k), expected)
 
 
 def test_ndcg_ignore_ties_with_k():
